@@ -1,0 +1,22 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+$commands = [
+    'php -v',
+    'yt-dlp --version',
+    'ffmpeg -version',
+    'ffprobe -version',
+];
+
+foreach ($commands as $command) {
+    echo "\n$command\n";
+    passthru($command, $exitCode);
+
+    if ($exitCode !== 0) {
+        fwrite(STDERR, "Command failed: $command\n");
+        exit($exitCode);
+    }
+}
+

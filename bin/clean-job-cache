@@ -1,0 +1,18 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require __DIR__ . '/../vendor/autoload.php';
+
+use YtDlpGui\Download\DownloadsDirectoryResolver;
+use YtDlpGui\Download\YtDlpJobService;
+
+$service = new YtDlpJobService(
+    downloadsDirectory: DownloadsDirectoryResolver::defaultForCurrentUser(),
+);
+
+$removed = $service->clearJobCache();
+
+fwrite(STDOUT, sprintf("Removed %d cached job file(s).\n", $removed));
+

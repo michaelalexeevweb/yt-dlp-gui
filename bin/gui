@@ -1,0 +1,1339 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+$bootstrapLogPath = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytdlpgui_startup_bootstrap.log';
+
+register_shutdown_function(static function () use ($bootstrapLogPath): void {
+    $lastError = error_get_last();
+    if (!is_array($lastError)) {
+        return;
+    }
+
+    $fatalTypes = [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR];
+    if (!in_array($lastError['type'], $fatalTypes, true)) {
+        return;
+    }
+
+    @file_put_contents(
+        $bootstrapLogPath,
+        sprintf(
+            "[%s] fatal startup error: %s in %s:%d\n",
+            date(DATE_ATOM),
+            $lastError['message'],
+            $lastError['file'],
+            $lastError['line'],
+        ),
+        FILE_APPEND,
+    );
+});
+
+if (PHP_OS_FAMILY === 'Windows' && class_exists(Phar::class, false)) {
+    $running = Phar::running(false);
+    $normalizedRunning = str_replace('/', '\\', $running);
+    $isUncPath = str_starts_with($normalizedRunning, '\\\\');
+
+    $copyTree = static function (string $from, string $to) use (&$copyTree): bool {
+        if (!is_dir($from)) {
+            return false;
+        }
+
+        if (!is_dir($to) && !mkdir($to, 0775, true) && !is_dir($to)) {
+            return false;
+        }
+
+        $entries = scandir($from);
+        if (!is_array($entries)) {
+            return false;
+        }
+
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+
+            $sourcePath = $from . DIRECTORY_SEPARATOR . $entry;
+            $targetPath = $to . DIRECTORY_SEPARATOR . $entry;
+
+            if (is_dir($sourcePath)) {
+                if (!$copyTree($sourcePath, $targetPath)) {
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (!copy($sourcePath, $targetPath)) {
+                return false;
+            }
+        }
+
+        return true;
+    };
+
+    $removeTree = static function (string $path) use (&$removeTree): bool {
+        if (!is_dir($path)) {
+            return true;
+        }
+
+        $entries = scandir($path);
+        if (!is_array($entries)) {
+            return false;
+        }
+
+        foreach ($entries as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+
+            $entryPath = $path . DIRECTORY_SEPARATOR . $entry;
+            if (is_dir($entryPath)) {
+                if (!$removeTree($entryPath)) {
+                    return false;
+                }
+
+                continue;
+            }
+
+            if (!@unlink($entryPath)) {
+                return false;
+            }
+        }
+
+        return @rmdir($path);
+    };
+
+    @file_put_contents(
+        $bootstrapLogPath,
+        sprintf(
+            "[%s] bootstrap: running=%s unc=%s\n",
+            date(DATE_ATOM),
+            $normalizedRunning,
+            $isUncPath ? 'yes' : 'no',
+        ),
+        FILE_APPEND,
+    );
+
+    if (
+        $normalizedRunning !== ''
+        && $isUncPath
+    ) {
+        $localAppData = getenv('LOCALAPPDATA');
+
+        if (is_string($localAppData) && $localAppData !== '') {
+            $sourceDir = dirname($normalizedRunning);
+            $artifactFingerprint = sprintf(
+                '%s|%s|%s',
+                $normalizedRunning,
+                @filesize($normalizedRunning) ?: 0,
+                @filemtime($normalizedRunning) ?: 0,
+            );
+            $runKey = substr(sha1($artifactFingerprint), 0, 12);
+            $targetDir = rtrim($localAppData, '/\\') . '\\YtDlpGui\\run\\' . $runKey;
+            $isDesktopBuild = is_file($sourceDir . DIRECTORY_SEPARATOR . '.desktop-build');
+            $requiredFiles = [basename($normalizedRunning), 'libboson-windows-x86_64.dll'];
+            if (!$isDesktopBuild) {
+                $requiredFiles = [
+                    ...$requiredFiles,
+                    'vcruntime140.dll',
+                    'vcruntime140_1.dll',
+                    'msvcp140.dll',
+                    'msvcp140_atomic_wait.dll',
+                ];
+            }
+
+            $hasRequiredFiles = static function (string $baseDir) use ($requiredFiles): bool {
+                clearstatcache();
+                foreach ($requiredFiles as $requiredFile) {
+                    $requiredPath = $baseDir . DIRECTORY_SEPARATOR . $requiredFile;
+                    if (!is_file($requiredPath) || !is_readable($requiredPath)) {
+                        return false;
+                    }
+                }
+
+                return true;
+            };
+
+            $missingRequiredFiles = static function (string $baseDir) use ($requiredFiles): array {
+                clearstatcache();
+                $missing = [];
+                foreach ($requiredFiles as $requiredFile) {
+                    $requiredPath = $baseDir . DIRECTORY_SEPARATOR . $requiredFile;
+                    if (!is_file($requiredPath) || !is_readable($requiredPath)) {
+                        $missing[] = $requiredFile;
+                    }
+                }
+                return $missing;
+            };
+
+            $normalizedTargetDir = str_replace('/', '\\', $targetDir);
+            $alreadyLocal = str_starts_with(
+                strtolower($normalizedRunning),
+                strtolower($normalizedTargetDir . '\\'),
+            );
+
+            if ($alreadyLocal) {
+                // Already running from local cache path.
+            } else {
+                if (is_dir($targetDir) && !$hasRequiredFiles($targetDir)) {
+                    $removeTree($targetDir);
+                }
+
+                if (!is_dir($targetDir)) {
+                    $stagingDir = $targetDir . '.tmp.' . (string)getmypid();
+                    $removeTree($stagingDir);
+
+                    $copied = $copyTree($sourceDir, $stagingDir);
+                    if ($copied) {
+                        if (!@rename($stagingDir, $targetDir)) {
+                            $removeTree($stagingDir);
+                            $copied = false;
+                        }
+                    } else {
+                        $removeTree($stagingDir);
+                    }
+                } else {
+                    $copied = true;
+                }
+
+                $targetExe = $targetDir . '\\' . basename($normalizedRunning);
+                if ($copied && $hasRequiredFiles($targetDir) && is_file($targetExe)) {
+                    @file_put_contents(
+                        $bootstrapLogPath,
+                        sprintf(
+                            "[%s] bootstrap: launching local exe %s\n",
+                            date(DATE_ATOM),
+                            $targetExe,
+                        ),
+                        FILE_APPEND,
+                    );
+
+                    $launchCommand = sprintf(
+                        'cmd /c start "" "%s"',
+                        str_replace('"', '""', $targetExe),
+                    );
+                    @exec($launchCommand);
+                    exit(0);
+                }
+
+                $missingInTarget = $missingRequiredFiles($targetDir);
+                $missingList = implode(', ', $missingInTarget);
+                @file_put_contents(
+                    $bootstrapLogPath,
+                    sprintf(
+                        "[%s] bootstrap: cannot prepare complete app bundle. source=%s target=%s copied=%s missing=%s\n",
+                        date(DATE_ATOM),
+                        $sourceDir,
+                        $targetDir,
+                        $copied ? 'yes' : 'no',
+                        $missingList !== '' ? $missingList : 'none',
+                    ),
+                    FILE_APPEND,
+                );
+
+                $bootstrapErrorMessage = $isDesktopBuild
+                    ? sprintf(
+                        "YtDlpGui cannot start: incomplete desktop app bundle.\n\nMissing files in the release folder:\n  %s\n\nMake sure you extracted the full ZIP archive.\nDesktop build still requires YtDlpGui.exe and libboson-windows-x86_64.dll in same folder.\n\nLog: %s",
+                        $missingList !== '' ? str_replace(', ', "\n  ", $missingList) : '(unknown)',
+                        $bootstrapLogPath,
+                    )
+                    : sprintf(
+                        "YtDlpGui cannot start: incomplete app bundle.\n\nMissing files in the release folder:\n  %s\n\nMake sure you extracted the full ZIP archive.\nIf VC++ DLLs are listed above, install:\nhttps://aka.ms/vs/17/release/vc_redist.x64.exe\n\nLog: %s",
+                        $missingList !== '' ? str_replace(', ', "\n  ", $missingList) : '(unknown)',
+                        $bootstrapLogPath,
+                    );
+
+                $psScript = sprintf(
+                    "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('%s', 'YtDlpGui startup error') | Out-Null",
+                    str_replace("'", "''", $bootstrapErrorMessage),
+                );
+                @exec(sprintf('powershell -NoProfile -ExecutionPolicy Bypass -Command %s', escapeshellarg($psScript)));
+
+                fwrite(STDERR, $bootstrapErrorMessage . "\n");
+                exit(1);
+            }
+        }
+    }
+}
+
+if (PHP_OS_FAMILY === 'Windows') {
+    $showWindowsStartupError = static function (string $message): void {
+        $psScript = sprintf(
+            "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('%s', 'YtDlpGui startup error') | Out-Null",
+            str_replace("'", "''", $message),
+        );
+        $command = sprintf(
+            'powershell -NoProfile -ExecutionPolicy Bypass -Command %s',
+            escapeshellarg($psScript),
+        );
+
+        @exec($command);
+    };
+
+    $requiredRuntimeDlls = ['vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_atomic_wait.dll'];
+    $probeDirectories = [];
+
+    $running = class_exists(Phar::class, false) ? Phar::running(false) : '';
+    if ($running !== '') {
+        $probeDirectories[] = dirname($running);
+    }
+
+    $windowsDir = getenv('WINDIR');
+    if (is_string($windowsDir) && $windowsDir !== '') {
+        $probeDirectories[] = rtrim($windowsDir, '/\\') . '\\System32';
+        $probeDirectories[] = rtrim($windowsDir, '/\\') . '\\SysWOW64';
+    }
+
+    // Note: PATH is intentionally excluded. The native Windows DLL loader resolves
+    // libboson's dependencies from the DLL's own directory and System32 — not from
+    // arbitrary PATH entries. Accepting PATH here would produce false negatives
+    // (startup check passes but libboson still fails to load at runtime).
+
+    $probeDirectories = array_values(array_unique($probeDirectories));
+
+    $missingRuntimeDlls = [];
+    foreach ($requiredRuntimeDlls as $runtimeDll) {
+        $found = false;
+
+        foreach ($probeDirectories as $probeDirectory) {
+            $candidate = rtrim($probeDirectory, '/\\') . DIRECTORY_SEPARATOR . $runtimeDll;
+            if (is_file($candidate) && is_readable($candidate)) {
+                $found = true;
+                break;
+            }
+        }
+
+        if (!$found) {
+            $missingRuntimeDlls[] = $runtimeDll;
+        }
+    }
+
+    if ($missingRuntimeDlls !== []) {
+        $runtimeList = implode(', ', $missingRuntimeDlls);
+        $errorMessage = sprintf(
+            "YtDlpGui cannot start because required runtime DLLs are missing: %s\n\nThese files must be present either:\n  - next to YtDlpGui.exe (bundled), or\n  - in C:\\Windows\\System32 (system-wide install)\n\nOption 1: re-download a complete build from the maintainer.\nOption 2: install Microsoft Visual C++ Redistributable 2015-2022 (x64):\nhttps://aka.ms/vs/17/release/vc_redist.x64.exe",
+            $runtimeList,
+        );
+
+        $bootstrapLogPath = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'ytdlpgui_startup_bootstrap.log';
+        @file_put_contents(
+            $bootstrapLogPath,
+            sprintf(
+                "[%s] bootstrap: missing VC++ runtime DLLs: %s\n",
+                date(DATE_ATOM),
+                $runtimeList,
+            ),
+            FILE_APPEND,
+        );
+
+        fwrite(STDERR, $errorMessage . "\n");
+        $showWindowsStartupError($errorMessage);
+        exit(1);
+    }
+}
+
+require __DIR__ . '/../vendor/autoload.php';
+
+use Boson\Application as BosonApplication;
+use Boson\ApplicationCreateInfo;
+use Boson\WebView\WebViewCreateInfo;
+use Boson\Window\WindowCreateInfo;
+use YtDlpGui\Download\DownloadsDirectoryResolver;
+use YtDlpGui\Download\YtDlpJobService;
+use YtDlpGui\Ui\DirectoryChooser;
+
+set_exception_handler(static function (\Throwable $e): void {
+    $logPath = sprintf('%s/%s', rtrim(sys_get_temp_dir(), '/\\'), 'ytdlpgui_startup_error.log');
+    $logChunk = sprintf(
+        "[%s] %s\n%s\n\n",
+        date(DATE_ATOM),
+        $e->getMessage(),
+        $e->getTraceAsString(),
+    );
+
+    @file_put_contents($logPath, $logChunk, FILE_APPEND);
+
+    if (PHP_OS_FAMILY === 'Windows') {
+        $running = Phar::running(false);
+        $dllPath = str_replace('/', '\\', dirname($running)) . '\\libboson-windows-x86_64.dll';
+        $dllExists = is_file($dllPath) ? 'yes' : 'no';
+        $dllReadable = is_readable($dllPath) ? 'yes' : 'no';
+        $windowsDir = getenv('WINDIR');
+        $system32 = is_string($windowsDir) && $windowsDir !== ''
+            ? rtrim($windowsDir, '/\\') . '\\System32'
+            : 'C:\\Windows\\System32';
+        $vcrt140 = $system32 . '\\vcruntime140.dll';
+        $vcrt140_1 = $system32 . '\\vcruntime140_1.dll';
+        $msvcp140 = $system32 . '\\msvcp140.dll';
+        $programFilesX86 = getenv('ProgramFiles(x86)');
+        $webView2Dir = is_string($programFilesX86) && $programFilesX86 !== ''
+            ? $programFilesX86 . '\\Microsoft\\EdgeWebView\\Application'
+            : '';
+        $webView2Present = $webView2Dir !== '' && is_dir($webView2Dir) ? 'yes' : 'no';
+
+        @file_put_contents(
+            $logPath,
+            sprintf(
+                "[%s] diagnostics: running=%s; lib=%s; exists=%s; readable=%s; vcruntime140=%s; vcruntime140_1=%s; msvcp140=%s; webview2=%s\n\n",
+                date(DATE_ATOM),
+                $running,
+                $dllPath,
+                $dllExists,
+                $dllReadable,
+                is_file($vcrt140) ? 'yes' : 'no',
+                is_file($vcrt140_1) ? 'yes' : 'no',
+                is_file($msvcp140) ? 'yes' : 'no',
+                $webView2Present,
+            ),
+            FILE_APPEND,
+        );
+
+        $extraHint = '';
+        if (str_contains($e->getMessage(), 'libboson-windows-x86_64.dll')) {
+            $extraHint = sprintf(
+                "\n\nDiagnostics:\n- lib path: %s\n- exists: %s\n- readable: %s\n- vcruntime140.dll in System32: %s\n- vcruntime140_1.dll in System32: %s\n- msvcp140.dll in System32: %s\n- Edge WebView2 runtime folder: %s\n\nInstall:\n1) Microsoft Edge WebView2 Runtime\n2) Microsoft Visual C++ Redistributable 2015-2022 (x64)",
+                $dllPath,
+                $dllExists,
+                $dllReadable,
+                is_file($vcrt140) ? 'yes' : 'no',
+                is_file($vcrt140_1) ? 'yes' : 'no',
+                is_file($msvcp140) ? 'yes' : 'no',
+                $webView2Present,
+            );
+        }
+
+        $message = sprintf(
+            "YtDlpGui failed to start.\n\n%s\n\nLog: %s%s",
+            $e->getMessage(),
+            $logPath,
+            $extraHint,
+        );
+
+        $psScript = sprintf(
+            "Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('%s', 'YtDlpGui startup error') | Out-Null",
+            str_replace("'", "''", $message),
+        );
+        $command = sprintf(
+            'powershell -NoProfile -ExecutionPolicy Bypass -Command %s',
+            escapeshellarg($psScript),
+        );
+
+        @exec($command);
+        exit(1);
+    }
+
+    fwrite(STDERR, sprintf("YtDlpGui startup error: %s\n", $e->getMessage()));
+    exit(1);
+});
+
+$downloadsDirectory = DownloadsDirectoryResolver::defaultForCurrentUser();
+
+$jobService = new YtDlpJobService(
+    downloadsDirectory: $downloadsDirectory,
+);
+
+register_shutdown_function(static function () use ($jobService): void {
+    $jobService->stopAllActiveJobs();
+});
+
+$bosonLibrary = null;
+if (PHP_OS_FAMILY === 'Windows' && class_exists(Phar::class, false)) {
+    $running = Phar::running(false);
+    if ($running !== '') {
+        $runDir = str_replace('/', '\\', dirname($running));
+        $candidate = $runDir . DIRECTORY_SEPARATOR . 'libboson-windows-x86_64.dll';
+        if (is_file($candidate) && is_readable($candidate)) {
+            $bosonLibrary = $candidate;
+        }
+
+        // Preload VC++ runtime DLLs from the run directory before Boson loads libboson.
+        // PHP FFI may use LOAD_LIBRARY_SEARCH_DEFAULT_DIRS when resolving libboson's
+        // dependencies, which does not include the DLL's own directory. By explicitly
+        // loading the VC++ DLLs into the process first (via kernel32 LoadLibraryA),
+        // they are already in the module list when libboson's imports are resolved.
+        $vcRuntimeDlls = ['vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_atomic_wait.dll'];
+        $anyVcRuntimePresent = false;
+        foreach ($vcRuntimeDlls as $vcDll) {
+            if (is_file($runDir . DIRECTORY_SEPARATOR . $vcDll)) {
+                $anyVcRuntimePresent = true;
+                break;
+            }
+        }
+
+        if ($anyVcRuntimePresent) {
+            try {
+                $kernel32 = FFI::cdef('void* __stdcall LoadLibraryA(const char* lpLibFileName);', 'kernel32.dll');
+                foreach ($vcRuntimeDlls as $vcDll) {
+                    $vcDllPath = $runDir . DIRECTORY_SEPARATOR . $vcDll;
+                    if (is_file($vcDllPath) && is_readable($vcDllPath)) {
+                        $kernel32->LoadLibraryA($vcDllPath);
+                    }
+                }
+            } catch (\Throwable) {
+                // Preloading is best-effort; if kernel32 FFI fails, proceed anyway.
+            }
+        }
+    }
+}
+
+$app = new BosonApplication(
+    info: new ApplicationCreateInfo(
+        name: 'YtDlpGui',
+        debug: false,
+        library: $bosonLibrary,
+        window: new WindowCreateInfo(
+            title: 'YtDlpGui',
+            width: 1200,
+            height: 800,
+            webview: new WebViewCreateInfo(
+                devTools: false,
+            ),
+        ),
+    ),
+);
+
+$app->webview->bindings->bind(
+    function: 'startDownload',
+    callback: static function (string $url, string $formatId = 'bestvideo*+bestaudio/best', string $downloadDirectory = ''): array {
+        $dir = trim($downloadDirectory);
+        if ($dir === '' || !is_dir($dir)) {
+            $dir = DownloadsDirectoryResolver::defaultForCurrentUser();
+        }
+
+        $service = new YtDlpJobService(downloadsDirectory: $dir);
+        return $service->start(
+            url: $url,
+            formatId: $formatId,
+        );
+    },
+);
+
+$app->webview->bindings->bind(
+    function: 'pollDownload',
+    callback: static function (string $jobId, int $offset) use ($jobService): array {
+        return $jobService->status(
+            jobId: $jobId,
+            offset: $offset,
+        );
+    },
+);
+
+$app->webview->bindings->bind(
+    function: 'selectDownloadDirectory',
+    callback: static function (): array {
+        $chooser = new DirectoryChooser();
+        $chosen = $chooser->choose();
+
+        if (!$chosen || !is_dir($chosen)) {
+            return [
+                'success' => false,
+                'directory' => null,
+                'message' => 'No directory selected.',
+            ];
+        }
+
+        return [
+            'success' => true,
+            'directory' => $chosen,
+            'message' => sprintf('Directory selected: %s', basename($chosen)),
+        ];
+    },
+);
+
+$app->webview->bindings->bind(
+    function: 'openDownloadsFolder',
+    callback: static function (string $directory = '') use ($jobService): array {
+        $dir = trim($directory);
+        if ($dir === '' || !is_dir($dir)) {
+            return $jobService->openDownloadsFolder();
+        }
+
+        $command = sprintf('open %s >/dev/null 2>&1', escapeshellarg($dir));
+        exec($command);
+
+        return [
+            'success' => true,
+            'message' => sprintf('Opened %s', basename($dir)),
+        ];
+    },
+);
+
+$app->webview->bindings->bind(
+    function: 'checkRuntimeDependencies',
+    callback: static function () use ($jobService): array {
+        return $jobService->checkRuntimeDependencies();
+    },
+);
+
+$app->webview->bindings->bind(
+    function: 'openInstallCommandInTerminal',
+    callback: static function (string $command): array {
+        $trimmedCommand = trim($command);
+        if ($trimmedCommand === '') {
+            return [
+                'success' => false,
+                'message' => 'Install command is empty.',
+            ];
+        }
+
+        if (PHP_OS_FAMILY === 'Darwin') {
+            $escapedCommand = str_replace(['\\', '"'], ['\\\\', '\\"'], $trimmedCommand);
+            $script = sprintf('tell application "Terminal" to activate\ntell application "Terminal" to do script "%s"', $escapedCommand);
+            $output = [];
+            $exitCode = 0;
+            exec(
+                command: sprintf('osascript -e %s', escapeshellarg($script)),
+                output: $output,
+                result_code: $exitCode,
+            );
+
+            return [
+                'success' => $exitCode === 0,
+                'message' => $exitCode === 0
+                    ? 'Terminal opened with install command.'
+                    : 'Cannot open Terminal automatically. Copy command from the red block and run it manually.',
+            ];
+        }
+
+        return [
+            'success' => false,
+            'message' => 'Automatic terminal launcher is currently implemented for macOS only.',
+        ];
+    },
+);
+
+$app->webview->bindings->bind(
+    function: 'stopDownload',
+    callback: static function (string $jobId) use ($jobService): array {
+        return $jobService->stop($jobId);
+    },
+);
+
+$app->webview->bindings->bind(
+    function: 'stopAllDownloads',
+    callback: static function () use ($jobService): array {
+        $stopped = $jobService->stopAllActiveJobs();
+
+        return [
+            'success' => true,
+            'message' => sprintf('Stopped %d active job(s).', $stopped),
+            'stopped' => $stopped,
+        ];
+    },
+);
+
+$app->webview->bindings->bind(
+    function: 'closeApplication',
+    callback: static function () use ($app, $jobService): array {
+        $jobService->stopAllActiveJobs();
+        $app->quit();
+
+        return [
+            'success' => true,
+            'message' => 'Closing application...',
+        ];
+    },
+);
+
+$app->webview->html = <<<'HTML'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YtDlpGui</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+    .wrap { max-width: 980px; margin: 48px auto; padding: 24px; }
+    h1 { margin: 0 0 12px; font-size: 32px; }
+    p { margin: 8px 0; line-height: 1.5; }
+    .card { background: #111827; border: 1px solid #334155; border-radius: 12px; padding: 16px; margin-top: 16px; }
+    label { display: block; margin-bottom: 8px; font-weight: 600; }
+    input { width: 100%; box-sizing: border-box; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #0b1220; color: #e2e8f0; }
+    select { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 8px; border: 1px solid #334155; background: #0b1220; color: #e2e8f0; }
+    .row { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .actions { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
+    button { border: 0; border-radius: 8px; background: #2563eb; color: #ffffff; padding: 10px 14px; font-size: 14px; cursor: pointer; }
+    button.secondary { background: #334155; }
+    button.danger { background: #dc2626; }
+    button.danger:hover:not(:disabled) { background: #b91c1c; }
+    button:disabled { opacity: 0.6; cursor: default; }
+    .spinner { width: 18px; height: 18px; border: 2px solid #334155; border-top-color: #60a5fa; border-radius: 50%; display: none; animation: spin 1s linear infinite; }
+    .spinner.active { display: inline-block; }
+    .status { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: #1f2937; }
+    .status.ok { background: #14532d; }
+    .status.error { background: #7f1d1d; }
+    .progress-wrap { margin-top: 12px; }
+    .progress-meta { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 13px; color: #cbd5e1; }
+    .progress-meta-right { display: flex; gap: 12px; }
+    .progress-bar { width: 100%; height: 12px; background: #0b1220; border: 1px solid #334155; border-radius: 999px; overflow: hidden; }
+    .progress-value { height: 100%; width: 0; background: linear-gradient(45deg, #2563eb 25%, #3b82f6 25%, #3b82f6 50%, #22d3ee 50%, #22d3ee 75%, #38bdf8 75%, #38bdf8); background-size: 28px 28px; animation: progress-stripes 1.2s linear infinite; transition: width 0.25s ease; }
+    .progress-value.completed { animation: none; background: linear-gradient(90deg, #22c55e, #16a34a); }
+    .progress-value.stopped { animation: none; background: linear-gradient(90deg, #ef4444, #dc2626); }
+    pre { margin-top: 12px; white-space: pre-wrap; background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 12px; min-height: 180px; max-height: 320px; overflow: auto; }
+    code { background: #1f2937; padding: 2px 6px; border-radius: 6px; }
+    .hint { font-size: 12px; color: #94a3b8; }
+    .hidden { display: none; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes progress-stripes { to { background-position: 28px 0; } }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>Yt Dlp Gui</h1>
+    <div class="card">
+      <form id="download-form">
+        <div class="row">
+          <div>
+            <label for="url">URL</label>
+            <input id="url" name="url" type="url" placeholder="https://www.youtube.com/watch?v=..." required>
+          </div>
+          <div id="format-controls" class="hidden">
+            <label for="video-profile-select" style="margin-top: 8px;">Formats</label>
+            <select id="video-profile-select" name="video-profile-select"></select>
+            <label for="quality-select" style="margin-top: 8px;">Quality</label>
+            <select id="quality-select" name="quality-select" size="9"></select>
+            <div class="hint">Choose format first, then quality. Default format gives merged video+audio.</div>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="choose-folder-button" class="secondary" type="button">Choose folder</button>
+          <button id="download-button" type="submit">Download</button>
+          <button id="stop-button" class="danger hidden" type="button" disabled>Stop</button>
+          <button id="open-folder-button" class="secondary hidden" type="button" disabled>Open in folder</button>
+          <span id="spinner" class="spinner" aria-hidden="true"></span>
+        </div>
+      </form>
+      <div id="status" class="status hidden" role="status"></div>
+      <div id="dependency-warning" class="status error hidden" role="alert">
+        <div id="dependency-warning-text"></div>
+        <pre id="dependency-install-command" class="hidden" style="min-height: 0; margin-top: 8px;"></pre>
+        <div class="actions" style="margin-top: 8px;">
+          <button id="open-install-terminal-button" class="secondary" type="button">Open terminal with install command</button>
+        </div>
+      </div>
+      <div class="actions hidden" id="details-actions" style="margin-top: 12px;">
+        <button id="toggle-details-button" class="secondary" type="button">Hide progress and log</button>
+      </div>
+      <div id="progress-wrap" class="progress-wrap hidden" aria-live="polite">
+        <div class="progress-meta">
+          <span>Progress</span>
+          <span class="progress-meta-right">
+            <span id="elapsed-label">00:00</span>
+            <span id="progress-label">0%</span>
+          </span>
+        </div>
+        <div class="progress-bar">
+          <div id="progress-value" class="progress-value"></div>
+        </div>
+      </div>
+      <pre id="output" class="hidden"></pre>
+    </div>
+  </main>
+
+  <script>
+      const form = document.getElementById('download-form');
+      const urlInput = document.getElementById('url');
+      const videoProfileSelect = document.getElementById('video-profile-select');
+      const qualitySelect = document.getElementById('quality-select');
+      const formatControls = document.getElementById('format-controls');
+      const openFolderButton = document.getElementById('open-folder-button');
+      const stopButton = document.getElementById('stop-button');
+      const downloadButton = document.getElementById('download-button');
+      const chooseFolderButton = document.getElementById('choose-folder-button');
+      const spinner = document.getElementById('spinner');
+      const status = document.getElementById('status');
+      const output = document.getElementById('output');
+      const progressValue = document.getElementById('progress-value');
+      const progressLabel = document.getElementById('progress-label');
+      const elapsedLabel = document.getElementById('elapsed-label');
+      const progressWrap = document.getElementById('progress-wrap');
+      const detailsActions = document.getElementById('details-actions');
+      const toggleDetailsButton = document.getElementById('toggle-details-button');
+      const dependencyWarning = document.getElementById('dependency-warning');
+      const dependencyWarningText = document.getElementById('dependency-warning-text');
+      const dependencyInstallCommand = document.getElementById('dependency-install-command');
+      const openInstallTerminalButton = document.getElementById('open-install-terminal-button');
+
+      let activeJobId = null;
+      let activeOffset = 0;
+      let pollTimer = null;
+      let hasSuccessfulDownload = false;
+      let hasDownloadDetails = false;
+      let isDetailsExpanded = true;
+      let hasConvertingLogNotice = false;
+      let lastStageLogged = '';
+      let downloadStartedAt = null;
+      let selectedDownloadDirectory = null;
+      let runtimeReady = true;
+      let installCommand = '';
+      let isClosingApplication = false;
+      let isStoppingDownload = false;
+      let profileCache = [
+        {
+          id: 'mp4-video',
+          label: 'MP4 (convert from best quality)',
+          qualities: [
+            { id: 'auto', label: 'Auto', formatId: 'preset:mp4' },
+            { id: '144', label: '144p', formatId: 'preset:mp4:144' },
+            { id: '240', label: '240p', formatId: 'preset:mp4:240' },
+            { id: '360', label: '360p', formatId: 'preset:mp4:360' },
+            { id: '480', label: '480p', formatId: 'preset:mp4:480' },
+            { id: '720', label: '720p', formatId: 'preset:mp4:720' },
+            { id: '1080', label: '1080p', formatId: 'preset:mp4:1080' },
+            { id: '1440', label: '1440p', formatId: 'preset:mp4:1440' },
+            { id: '2160', label: '2160p', formatId: 'preset:mp4:2160' },
+          ],
+        },
+        {
+          id: 'mp3-audio',
+          label: 'MP3 (convert from best audio)',
+          qualities: [
+            { id: 'auto', label: 'Auto', formatId: 'preset:mp3' },
+            { id: '64', label: '64 kbps', formatId: 'preset:mp3:64' },
+            { id: '128', label: '128 kbps', formatId: 'preset:mp3:128' },
+            { id: '256', label: '256 kbps', formatId: 'preset:mp3:256' },
+            { id: '320', label: '320 kbps', formatId: 'preset:mp3:320' },
+          ],
+        },
+      ];
+
+      const setStatus = (text, mode = 'idle') => {
+        const normalizedText = String(text).trim();
+        status.textContent = normalizedText;
+        status.className = 'status';
+        status.classList.toggle('hidden', normalizedText.length === 0);
+
+        if (normalizedText.length === 0) {
+          return;
+        }
+
+        if (mode === 'ok') {
+          status.classList.add('ok');
+        }
+        if (mode === 'error') {
+          status.classList.add('error');
+        }
+      };
+
+      const setProgress = (percent) => {
+        const normalized = Math.max(0, Math.min(100, Number(percent) || 0));
+        progressValue.style.width = `${normalized}%`;
+        progressValue.classList.toggle('completed', normalized >= 100);
+        progressValue.classList.remove('stopped');
+        progressLabel.textContent = `${normalized.toFixed(1)}%`;
+        updateElapsedLabel();
+      };
+
+      const markProgressStopped = () => {
+        progressValue.classList.remove('completed');
+        progressValue.classList.add('stopped');
+      };
+
+      const setProgressIfHigher = (percent) => {
+        const current = Number.parseFloat(progressLabel.textContent.replace('%', '')) || 0;
+        const normalized = Math.max(0, Math.min(100, Number(percent) || 0));
+        if (normalized > current) {
+          setProgress(normalized);
+        }
+      };
+
+      const updateElapsedLabel = () => {
+        if (!downloadStartedAt) {
+          elapsedLabel.textContent = '00:00';
+          return;
+        }
+
+        const elapsedMs = Math.max(0, Date.now() - downloadStartedAt);
+        const totalSeconds = Math.floor(elapsedMs / 1000);
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        elapsedLabel.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+      };
+
+      const appendStageLog = (stage, text) => {
+        if (lastStageLogged === stage) {
+          return;
+        }
+
+        lastStageLogged = stage;
+        output.textContent += `\n[stage] ${text}\n`;
+      };
+
+      const updateStageProgress = (result) => {
+        const stage = typeof result.stage === 'string' ? result.stage : '';
+
+        if (stage === 'starting') {
+          setStatus('Launching yt-dlp...', 'idle');
+          appendStageLog('starting', 'Launching yt-dlp');
+          setProgressIfHigher(3);
+          return;
+        }
+
+        if (stage === 'downloading') {
+          setStatus('Downloading...', 'idle');
+          appendStageLog('downloading', 'Downloading media segments');
+          if (typeof result.progress === 'number') {
+            // Download stage occupies 10..85% of total pipeline
+            const staged = 10 + (Math.max(0, Math.min(100, result.progress)) * 0.75);
+            setProgress(staged);
+          } else {
+            setProgressIfHigher(15);
+          }
+          return;
+        }
+
+        if (stage === 'starting-ffmpeg') {
+          setStatus('Starting ffmpeg...', 'idle');
+          appendStageLog('starting-ffmpeg', 'Starting ffmpeg post-processing');
+          setProgressIfHigher(88);
+          return;
+        }
+
+        if (stage === 'converting') {
+          setStatus('Converting...', 'idle');
+          appendStageLog('converting', 'Converting output format with ffmpeg');
+          if (typeof result.progress === 'number') {
+            // Convert stage occupies 88..99.5% of total pipeline
+            const staged = 88 + (Math.max(0, Math.min(100, result.progress)) * 0.115);
+            setProgress(staged);
+          } else {
+            setProgressIfHigher(95);
+          }
+
+          if (!hasConvertingLogNotice) {
+            appendLog('\n[app] Converting...\n');
+            hasConvertingLogNotice = true;
+          }
+        }
+      };
+
+      const syncDetailsVisibility = () => {
+        const showDetails = hasDownloadDetails && isDetailsExpanded;
+        progressWrap.classList.toggle('hidden', !showDetails);
+        output.classList.toggle('hidden', !showDetails);
+
+        detailsActions.classList.toggle('hidden', !hasDownloadDetails);
+        toggleDetailsButton.disabled = !hasDownloadDetails;
+        toggleDetailsButton.textContent = isDetailsExpanded
+          ? 'Hide progress and log'
+          : 'Show progress and log';
+      };
+
+      const setBusy = (isBusy) => {
+        downloadButton.disabled = isBusy || !runtimeReady;
+        videoProfileSelect.disabled = isBusy;
+        qualitySelect.disabled = isBusy;
+        urlInput.readOnly = isBusy;
+        spinner.classList.toggle('active', isBusy);
+        stopButton.classList.toggle('hidden', !isBusy);
+        stopButton.disabled = !isBusy || isStoppingDownload;
+        openFolderButton.disabled = isBusy || !hasSuccessfulDownload;
+        openFolderButton.classList.toggle('hidden', !hasSuccessfulDownload);
+      };
+
+      const stopActiveDownload = async () => {
+        if (activeJobId === null || isStoppingDownload) {
+          return;
+        }
+
+        isStoppingDownload = true;
+        stopButton.disabled = true;
+
+        try {
+          const stopDownloadBinding = await waitForBinding('stopDownload');
+          const result = await stopDownloadBinding(activeJobId);
+
+          setStatus(result.message, result.success ? 'ok' : 'error');
+          if (result.success) {
+            markProgressStopped();
+          }
+
+          stopPolling();
+          activeJobId = null;
+          setBusy(false);
+        } catch (error) {
+          const message = toErrorMessage(error);
+          setStatus(`Stop error: ${message}`, 'error');
+        } finally {
+          isStoppingDownload = false;
+          stopButton.disabled = activeJobId === null;
+        }
+      };
+
+      const updateFormatControlsVisibility = () => {
+        const hasUrl = urlInput.value.trim().length > 0;
+        formatControls.classList.toggle('hidden', !hasUrl);
+      };
+
+      const toErrorMessage = (error) => String(error);
+
+      const waitForBinding = async (name, timeoutMs = 6000) => {
+        const startedAt = Date.now();
+
+        while (typeof window[name] !== 'function') {
+          if (Date.now() - startedAt >= timeoutMs) {
+            throw new Error(`Binding "${name}" is unavailable.`);
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+
+        return window[name];
+      };
+
+      const requestCloseApplication = async () => {
+        if (isClosingApplication) {
+          return;
+        }
+
+        isClosingApplication = true;
+        try {
+          const closeApplicationBinding = await waitForBinding('closeApplication');
+          await closeApplicationBinding();
+        } catch (error) {
+          const message = toErrorMessage(error);
+          setStatus(`Cannot close app: ${message}`, 'error');
+          isClosingApplication = false;
+        }
+      };
+
+      const flushUiFrame = () => new Promise((resolve) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => resolve());
+        });
+      });
+
+      const selectDownloadDirectory = async () => {
+        try {
+          const selectDownloadDirectoryBinding = await waitForBinding('selectDownloadDirectory');
+          const result = await selectDownloadDirectoryBinding();
+          if (result.success && result.directory) {
+            selectedDownloadDirectory = result.directory;
+            setStatus(`Will download to: ${result.directory}`, 'ok');
+            return true;
+          } else {
+            setStatus(result.message || 'Folder selection cancelled.', 'error');
+            return false;
+          }
+        } catch (error) {
+          const message = toErrorMessage(error);
+          setStatus(`Folder selection error: ${message}`, 'error');
+          return false;
+        }
+      };
+
+      const stopPolling = () => {
+        if (pollTimer !== null) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      };
+
+      const appendLog = (chunk) => {
+        if (chunk) {
+          output.textContent += chunk;
+        }
+      };
+
+      const applyRuntimeCheck = (result) => {
+        runtimeReady = result.success === true;
+        installCommand = typeof result.installCommand === 'string' ? result.installCommand : '';
+
+        if (runtimeReady) {
+          dependencyWarning.classList.add('hidden');
+          dependencyInstallCommand.textContent = '';
+          dependencyInstallCommand.classList.add('hidden');
+          openInstallTerminalButton.disabled = true;
+          setStatus('', 'idle');
+          setBusy(false);
+          return;
+        }
+
+        const fallbackMessage = Array.isArray(result.missing)
+          ? `Missing runtime tools: ${result.missing.join(', ')}`
+          : 'Runtime dependencies are unavailable.';
+        const baseMessage = typeof result.message === 'string' && result.message.trim().length > 0
+          ? result.message
+          : fallbackMessage;
+        dependencyWarningText.textContent = `${baseMessage}. Please install/reinstall them and restart the app.`;
+        if (installCommand.length > 0) {
+          dependencyInstallCommand.textContent = installCommand;
+          dependencyInstallCommand.classList.remove('hidden');
+        } else {
+          dependencyInstallCommand.textContent = '';
+          dependencyInstallCommand.classList.add('hidden');
+        }
+        dependencyWarning.classList.remove('hidden');
+        openInstallTerminalButton.disabled = installCommand.length === 0;
+        setStatus(result.message || 'Missing runtime tools.', 'error');
+        setBusy(false);
+      };
+
+      const runRuntimeCheck = async () => {
+        try {
+          const checkRuntimeDependenciesBinding = await waitForBinding('checkRuntimeDependencies');
+          const result = await checkRuntimeDependenciesBinding();
+          applyRuntimeCheck(result);
+        } catch (error) {
+          const message = toErrorMessage(error);
+          runtimeReady = false;
+          dependencyWarningText.textContent = 'Cannot verify runtime dependencies.';
+          dependencyWarning.classList.remove('hidden');
+          openInstallTerminalButton.disabled = true;
+          setStatus(`Dependency check error: ${message}`, 'error');
+          setBusy(false);
+        }
+      };
+
+      const selectedProfile = () => {
+        const selectedId = videoProfileSelect.value;
+        return profileCache.find((profile) => profile.id === selectedId) || profileCache[0];
+      };
+
+      const selectedFormatId = () => {
+        const index = qualitySelect.selectedIndex;
+        const hasSelection = index >= 0 && index < qualitySelect.options.length;
+        const value = hasSelection ? qualitySelect.options[index].value : '';
+
+        return value && value.length > 0 ? value : 'preset:mp4';
+      };
+
+      const renderProfiles = () => {
+        videoProfileSelect.innerHTML = '';
+
+        profileCache.forEach((profile, index) => {
+          const option = document.createElement('option');
+          option.value = profile.id;
+          option.textContent = profile.label;
+          if (index === 0) {
+            option.selected = true;
+          }
+
+          videoProfileSelect.appendChild(option);
+        });
+
+        renderQualities();
+      };
+
+      const renderQualities = () => {
+        const profile = selectedProfile();
+        const qualities = profile.qualities;
+
+        qualitySelect.innerHTML = '';
+
+        qualities.forEach((quality, index) => {
+          const option = document.createElement('option');
+          option.value = quality.formatId;
+          option.textContent = quality.label;
+          if (index === 0) {
+            option.selected = true;
+          }
+
+          qualitySelect.appendChild(option);
+        });
+
+        if (qualities.length === 0) {
+          const option = document.createElement('option');
+          option.value = 'preset:mp4';
+          option.textContent = 'Fallback to MP4 auto';
+          option.selected = true;
+          qualitySelect.appendChild(option);
+        }
+      };
+
+      const poll = async () => {
+        if (activeJobId === null) {
+          return;
+        }
+
+        try {
+          const pollDownloadBinding = await waitForBinding('pollDownload');
+          const result = await pollDownloadBinding(activeJobId, activeOffset);
+
+          if (!result.success) {
+            setStatus(result.message, 'error');
+            stopPolling();
+            setBusy(false);
+            activeJobId = null;
+            return;
+          }
+
+          updateElapsedLabel();
+          appendLog(result.outputChunk);
+          activeOffset = result.offset;
+
+          updateStageProgress(result);
+
+          if (result.done) {
+            setStatus(result.message, result.isSuccess ? 'ok' : 'error');
+            appendStageLog(result.isSuccess ? 'completed' : 'failed', result.isSuccess ? 'Completed successfully' : 'Failed');
+            if (result.isSuccess) {
+              setProgress(100);
+              hasSuccessfulDownload = true;
+            }
+
+            stopPolling();
+            setBusy(false);
+            activeJobId = null;
+            isStoppingDownload = false;
+          }
+        } catch (error) {
+          const message = toErrorMessage(error);
+          setStatus(`Polling error: ${message}`, 'error');
+          stopPolling();
+          setBusy(false);
+          activeJobId = null;
+          isStoppingDownload = false;
+        }
+      };
+
+      videoProfileSelect.addEventListener('change', renderQualities);
+
+      urlInput.addEventListener('input', () => {
+        updateFormatControlsVisibility();
+      });
+
+      chooseFolderButton.addEventListener('click', async () => {
+        await selectDownloadDirectory();
+      });
+
+      openFolderButton.addEventListener('click', async () => {
+        try {
+          const openDownloadsFolderBinding = await waitForBinding('openDownloadsFolder');
+          const result = await openDownloadsFolderBinding(selectedDownloadDirectory || '');
+          setStatus(result.message, result.success ? 'ok' : 'error');
+        } catch (error) {
+          const message = toErrorMessage(error);
+          setStatus(`Open folder error: ${message}`, 'error');
+        }
+      });
+
+      stopButton.addEventListener('click', async () => {
+        await stopActiveDownload();
+      });
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+
+        if (!runtimeReady) {
+          setStatus('Install required runtime tools first.', 'error');
+          return;
+        }
+
+        if (!selectedDownloadDirectory) {
+          const dirSelected = await selectDownloadDirectory();
+          if (!dirSelected) {
+            return;
+          }
+        }
+
+        output.textContent = '';
+        lastStageLogged = '';
+        downloadStartedAt = Date.now();
+        updateElapsedLabel();
+        setProgress(0);
+        progressValue.classList.remove('stopped');
+        hasSuccessfulDownload = false;
+        hasConvertingLogNotice = false;
+        openFolderButton.disabled = true;
+        openFolderButton.classList.add('hidden');
+
+        const url = urlInput.value.trim();
+        if (url.length === 0) {
+          setStatus('Please paste URL first.', 'error');
+          return;
+        }
+
+        hasDownloadDetails = true;
+        isDetailsExpanded = true;
+        syncDetailsVisibility();
+
+        setBusy(true);
+        setStatus('Launching yt-dlp...', 'idle');
+        appendStageLog('starting', 'Launching yt-dlp');
+        setProgress(3);
+
+        // Stage: loading manifest and preparing format selection.
+        setStatus('Loading manifest...', 'idle');
+        appendStageLog('manifest', 'Loading video manifest and available streams');
+        setProgressIfHigher(8);
+
+        // Let UI repaint and show stage status/spinner before backend call
+        await flushUiFrame();
+
+        try {
+          const startDownloadBinding = await waitForBinding('startDownload');
+          const result = await startDownloadBinding(url, selectedFormatId(), selectedDownloadDirectory || '');
+
+          if (!result.success || !result.jobId) {
+            setStatus(result.message, 'error');
+            setBusy(false);
+            return;
+          }
+
+          setStatus('Downloading...', 'idle');
+          setProgressIfHigher(10);
+
+          activeJobId = result.jobId;
+          activeOffset = result.offset;
+          pollTimer = setInterval(poll, 400);
+          await poll();
+        } catch (error) {
+          const message = toErrorMessage(error);
+          setStatus(`Binding error: ${message}`, 'error');
+          setBusy(false);
+        }
+      });
+
+      toggleDetailsButton.addEventListener('click', () => {
+        if (!hasDownloadDetails) {
+          return;
+        }
+
+        isDetailsExpanded = !isDetailsExpanded;
+        syncDetailsVisibility();
+      });
+
+      openInstallTerminalButton.addEventListener('click', async () => {
+        if (installCommand.length === 0) {
+          setStatus('Install command is unavailable.', 'error');
+          return;
+        }
+
+        try {
+          const openInstallCommandInTerminalBinding = await waitForBinding('openInstallCommandInTerminal');
+          const result = await openInstallCommandInTerminalBinding(installCommand);
+          setStatus(result.message, result.success ? 'ok' : 'error');
+        } catch (error) {
+          const message = toErrorMessage(error);
+          setStatus(`Cannot open terminal: ${message}`, 'error');
+        }
+      });
+
+      document.addEventListener('keydown', (event) => {
+        const key = String(event.key || '').toLowerCase();
+        const hasCloseModifier = event.ctrlKey || event.metaKey;
+        const isCloseShortcut = key === 'w' || key === 'q';
+
+        if (!hasCloseModifier || !isCloseShortcut) {
+          return;
+        }
+
+        event.preventDefault();
+        requestCloseApplication();
+      });
+
+      renderProfiles();
+      updateFormatControlsVisibility();
+      syncDetailsVisibility();
+      setBusy(false);
+      runRuntimeCheck();
+  </script>
+</body>
+</html>
+HTML;
+
+$app->run();
+

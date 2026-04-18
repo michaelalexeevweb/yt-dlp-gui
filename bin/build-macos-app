@@ -1,0 +1,147 @@
+#!/bin/sh
+
+set -eu
+
+APP_NAME="${APP_NAME:-YtDlpGui}"
+BUNDLE_ID="${BUNDLE_ID:-com.michaelalexeev.ytdlpgui}"
+APP_BUNDLE_PATH="${APP_BUNDLE_PATH:-}"
+ICON_SOURCE="${ICON_SOURCE:-}"
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+PROJECT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-$PROJECT_DIR/dist/build/macos}"
+TOOLS_SOURCE_DIR="${TOOLS_SOURCE_DIR:-$PROJECT_DIR/dist/build/tools}"
+
+if [ "${1:-}" = "--help" ]; then
+    cat <<'USAGE'
+Usage: bin/build-macos-app [compiled_binary_path]
+
+Builds a macOS .app bundle from a compiled Boson binary.
+
+Env overrides:
+  APP_NAME         App bundle name (default: YtDlpGui)
+  BUNDLE_ID        CFBundleIdentifier (default: com.michaelalexeev.ytdlpgui)
+  APP_BUNDLE_PATH  Output bundle path (default: dist/macos/<APP_NAME>.app)
+  BUILD_DIR        Directory where compiled binary is searched
+  TOOLS_SOURCE_DIR Directory with yt-dlp/ffmpeg/ffprobe (copied into app)
+  ICON_SOURCE      PNG file for icon conversion to .icns
+USAGE
+    exit 0
+fi
+
+if [ "$APP_BUNDLE_PATH" = "" ]; then
+    APP_BUNDLE_PATH="$PROJECT_DIR/dist/macos/$APP_NAME.app"
+fi
+
+if [ "${1:-}" != "" ]; then
+    BINARY_SOURCE_PATH="$1"
+else
+    BINARY_SOURCE_PATH="$(find "$BUILD_DIR" -type f -name "$APP_NAME" | head -n 1)"
+fi
+
+if [ "$BINARY_SOURCE_PATH" = "" ] || [ ! -f "$BINARY_SOURCE_PATH" ]; then
+    echo "Compiled binary was not found. Build first (for example: ./vendor/bin/boson compile)." >&2
+    exit 1
+fi
+
+if [ ! -x "$BINARY_SOURCE_PATH" ]; then
+    chmod +x "$BINARY_SOURCE_PATH"
+fi
+
+APP_CONTENTS_DIR="$APP_BUNDLE_PATH/Contents"
+APP_MACOS_DIR="$APP_CONTENTS_DIR/MacOS"
+APP_RESOURCES_DIR="$APP_CONTENTS_DIR/Resources"
+APP_BINARY_PATH="$APP_MACOS_DIR/$APP_NAME"
+APP_LIBBOSON_PATH="$APP_MACOS_DIR/libboson-darwin-universal.dylib"
+
+rm -rf "$APP_BUNDLE_PATH"
+mkdir -p "$APP_MACOS_DIR" "$APP_RESOURCES_DIR"
+
+# Prevent Spotlight from indexing the dist directory (avoids duplicate app in Launchpad/Spotlight)
+touch "$(dirname "$APP_BUNDLE_PATH")/.metadata_never_index"
+
+cp "$BINARY_SOURCE_PATH" "$APP_BINARY_PATH"
+chmod +x "$APP_BINARY_PATH"
+
+LIB_SOURCE_PATH="$(dirname "$BINARY_SOURCE_PATH")/libboson-darwin-universal.dylib"
+if [ -f "$LIB_SOURCE_PATH" ]; then
+    cp "$LIB_SOURCE_PATH" "$APP_LIBBOSON_PATH"
+fi
+
+if [ -d "$TOOLS_SOURCE_DIR" ]; then
+    mkdir -p "$APP_MACOS_DIR/tools"
+    cp -R "$TOOLS_SOURCE_DIR"/. "$APP_MACOS_DIR/tools/"
+    chmod +x "$APP_MACOS_DIR/tools/yt-dlp" "$APP_MACOS_DIR/tools/ffmpeg" "$APP_MACOS_DIR/tools/ffprobe" 2>/dev/null || true
+fi
+
+cat > "$APP_CONTENTS_DIR/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>$APP_NAME</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>$BUNDLE_ID</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>$APP_NAME</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+if [ "$ICON_SOURCE" = "" ]; then
+    for candidate in \
+        "$PROJECT_DIR/resources/AppIcon.png" \
+        "$PROJECT_DIR/../assets/php_logo.png"
+    do
+        if [ -f "$candidate" ]; then
+            ICON_SOURCE="$candidate"
+            break
+        fi
+    done
+fi
+
+PREBUILT_ICON_PATH="$PROJECT_DIR/resources/AppIcon.icns"
+
+if [ -f "$PREBUILT_ICON_PATH" ]; then
+    cp "$PREBUILT_ICON_PATH" "$APP_RESOURCES_DIR/AppIcon.icns"
+elif [ "$ICON_SOURCE" != "" ] && [ -f "$ICON_SOURCE" ] && command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+    ICON_TMP_DIR="$(mktemp -d)"
+    ICONSET_DIR="$ICON_TMP_DIR/AppIcon.iconset"
+    mkdir -p "$ICONSET_DIR"
+
+    for size in 16 32 128 256 512; do
+        sips -z "$size" "$size" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
+        scaled_size=$((size * 2))
+        sips -z "$scaled_size" "$scaled_size" "$ICON_SOURCE" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
+    done
+
+    iconutil -c icns "$ICONSET_DIR" -o "$APP_RESOURCES_DIR/AppIcon.icns"
+    rm -rf "$ICON_TMP_DIR"
+else
+    echo "AppIcon.icns was not found and icon tools are unavailable. App will use default icon." >&2
+fi
+
+# Refresh bundle metadata so Finder/Dock picks updated icon immediately.
+touch "$APP_CONTENTS_DIR/Info.plist" "$APP_BUNDLE_PATH"
+
+echo "App bundle created: $APP_BUNDLE_PATH"
+

@@ -1,0 +1,11 @@
+services:
+  php:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ytdlp_gui_php
+    working_dir: /application
+    volumes:
+      - .:/application
+    tty: true
+

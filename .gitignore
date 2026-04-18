@@ -1,0 +1,8 @@
+/vendor/
+/.idea/
+/.phpunit.result.cache
+/var/
+/tools/
+/.boson.*.json
+/dist
+.DS_Store

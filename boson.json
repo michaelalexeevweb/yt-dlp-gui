@@ -1,0 +1,40 @@
+{
+    "name": "YtDlpGui",
+    "target": [
+        {
+            "type": "macos",
+            "arch": "arm64"
+        }
+    ],
+    "entrypoint": "bin/gui",
+    "output": "dist/build",
+    "extensions": [
+        "ffi"
+    ],
+    "build": {
+        "directories": [
+            "dist/build/tools"
+        ],
+        "finder": [
+            {
+                "directory": "src",
+                "name": "*.php"
+            },
+            {
+                "directory": "vendor",
+                "not-directory": "vendor/boson-php/compiler",
+                "name": "*.php",
+                "not-name": [
+                    "*Test.php",
+                    "*TestCase.php",
+                    ".phpstorm.meta.php"
+                ]
+            }
+        ]
+    },
+    "ini": {
+        "memory_limit": "512M",
+        "ffi.enable": "1"
+    }
+}
+

@@ -1,0 +1,30 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require __DIR__ . '/../vendor/autoload.php';
+
+use YtDlpGui\Download\DownloadsDirectoryResolver;
+use YtDlpGui\Download\YtDlpDownloader;
+
+
+if (!array_key_exists(1, $argv)) {
+    fwrite(STDERR, "Usage: php bin/download-url <url>\n");
+    exit(1);
+}
+
+$downloader = new YtDlpDownloader(
+    downloadsDirectory: DownloadsDirectoryResolver::defaultForCurrentUser(),
+);
+
+$result = $downloader->download(
+    url: (string) $argv[1],
+);
+
+fwrite(STDOUT, $result->message . PHP_EOL);
+if ($result->outputLines !== []) {
+    fwrite(STDOUT, implode(PHP_EOL, $result->outputLines) . PHP_EOL);
+}
+
+exit($result->isSuccess ? 0 : 1);

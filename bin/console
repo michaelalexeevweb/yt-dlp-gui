@@ -1,0 +1,17 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require __DIR__ . '/../vendor/autoload.php';
+
+use Symfony\Component\Console\Application as ConsoleApplication;
+use YtDlpGui\Console\BuildReleaseCommand;
+use YtDlpGui\Console\PrepareWindowsRuntimeCommand;
+
+$application = new ConsoleApplication('YtDlpGui CLI', '0.1.0');
+$application->add(new BuildReleaseCommand());
+$application->add(new PrepareWindowsRuntimeCommand());
+
+exit($application->run());
+
