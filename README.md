@@ -28,7 +28,9 @@ Publish 2 assets in GitHub Release:
 - [`YtDlpGui-macos-arm64-desktop.zip`](https://github.com/michaelalexeevweb/yt-dlp-gui/releases/download/1.0.0/YtDlpGui-macos-arm64-desktop.zip) - app without bundled tools (user installs tools)
 - [`YtDlpGui-macos-arm64-portable.zip`](https://github.com/michaelalexeevweb/yt-dlp-gui/releases/download/1.0.0/YtDlpGui-macos-arm64-portable.zip) - app + bundled tools (`yt-dlp`, `ffmpeg`, `ffprobe`)
 
-Build commands (local, no Docker):
+Build commands (Docker-first):
+
+`release-macos-*` targets run inside `docker compose` by default.
 
 ```bash
 make release-macos-portable
@@ -37,16 +39,22 @@ make release-macos-desktop
 
 Outputs to `dist/release/`.
 
-## Work locally
+## Work locally (Docker)
+
+Build container image:
+
+```bash
+docker compose build php
+```
 
 Install dependencies:
 
 ```bash
-composer install
+docker compose run --rm php composer install
 ```
 
-Run dev build (local Boson):
+Run checks:
 
 ```bash
-make dev-macos
+docker compose run --rm php composer check
 ```
