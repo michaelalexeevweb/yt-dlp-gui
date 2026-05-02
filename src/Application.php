@@ -8,7 +8,7 @@ final class Application
 {
     public function about(): string
     {
-        return 'YtDlpGui bootstrap is ready (PHP 8.5 + Boson + PHPStan level 8).';
+        return 'YtDlpGui bootstrap is ready (PHP 8.4 + Boson + PHPStan level 8).';
     }
 }
 
