@@ -18,7 +18,7 @@ Build target now: macOS only.
 
 - PHP 8.4+
 - `ext-ffi`
-- Boson compiler
+- [Boson compiler](https://github.com/boson-php/boson)
 - `yt-dlp`, `ffmpeg`, `ffprobe` (bundled in portable release)
 
 ## Releases
