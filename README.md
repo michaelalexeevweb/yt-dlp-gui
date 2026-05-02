@@ -1,18 +1,27 @@
-# YtDlpGui
+# yt-dlp-gui
 
-[![MIT License](https://img.shields.io/github/license/michaelalexeevweb/yt-dlp-gui)](LICENSE)
+[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/michaelalexeevweb/yt-dlp-gui/actions/workflows/ci.yml/badge.svg)](https://github.com/michaelalexeevweb/yt-dlp-gui/actions/workflows/ci.yml)
-[![Latest Version](https://img.shields.io/packagist/v/michaelalexeevweb/yt-dlp-gui)](https://packagist.org/packages/michaelalexeevweb/yt-dlp-gui)
+[![Latest Release](https://img.shields.io/github/v/release/michaelalexeevweb/yt-dlp-gui)](https://github.com/michaelalexeevweb/yt-dlp-gui/releases)
 [![PHP Version](https://img.shields.io/packagist/php-v/michaelalexeevweb/yt-dlp-gui)](https://packagist.org/packages/michaelalexeevweb/yt-dlp-gui)
-[![Total Downloads](https://img.shields.io/packagist/dt/michaelalexeevweb/yt-dlp-gui)](https://packagist.org/packages/michaelalexeevweb/yt-dlp-gui)
 
-Simple PHP GUI for `yt-dlp`.
+Packagist: [michaelalexeevweb/yt-dlp-gui](https://packagist.org/packages/michaelalexeevweb/yt-dlp-gui)
 
-Build target now: macOS only.
+Install via Composer:
+
+```bash
+composer require michaelalexeevweb/yt-dlp-gui
+```
+
+Simple macOS desktop GUI for `yt-dlp` built with PHP and Boson.
+
+Download videos from YouTube and other sites using a simple desktop interface.
+
+Currently supports macOS only.
 
 ## Screenshot
 
-![YtDlpGui screenshot](resources/example.jpg)
+![yt-dlp GUI macOS application screenshot](resources/example.jpg)
 
 ## Requirements
 
@@ -23,10 +32,14 @@ Build target now: macOS only.
 
 ## Releases
 
-Publish 2 assets in GitHub Release:
+Two builds are available:
 
-- [`YtDlpGui-macos-arm64-desktop.zip`](https://github.com/michaelalexeevweb/yt-dlp-gui/releases/download/1.0.0/YtDlpGui-macos-arm64-desktop.zip) - app without bundled tools (user installs tools)
-- [`YtDlpGui-macos-arm64-portable.zip`](https://github.com/michaelalexeevweb/yt-dlp-gui/releases/download/1.0.0/YtDlpGui-macos-arm64-portable.zip) - app + bundled tools (`yt-dlp`, `ffmpeg`, `ffprobe`)
+- [`YtDlpGui-macos-arm64-desktop.zip`](https://github.com/michaelalexeevweb/yt-dlp-gui/releases/download/1.0.0/YtDlpGui-macos-arm64-desktop.zip) - Desktop build, requires user-installed tools
+- [`YtDlpGui-macos-arm64-portable.zip`](https://github.com/michaelalexeevweb/yt-dlp-gui/releases/download/1.0.0/YtDlpGui-macos-arm64-portable.zip) - Portable build, includes `yt-dlp`, `ffmpeg`, `ffprobe`
+
+## Quick start
+
+Download the portable release and run the app.
 
 Build commands (Docker-first):
 
