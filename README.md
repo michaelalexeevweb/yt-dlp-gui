@@ -10,6 +10,10 @@ Simple PHP GUI for `yt-dlp`.
 
 Build target now: macOS only.
 
+## Screenshot
+
+![YtDlpGui screenshot](resources/example.jpg)
+
 ## Requirements
 
 - PHP 8.4+
