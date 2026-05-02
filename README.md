@@ -21,8 +21,8 @@ Build target now: macOS only.
 
 Publish 2 assets in GitHub Release:
 
-- `YtDlpGui-macos-arm64-portable.zip` - app + bundled tools (`yt-dlp`, `ffmpeg`, `ffprobe`)
-- `YtDlpGui-macos-arm64-desktop.zip` - app without bundled tools (user installs tools)
+- [`YtDlpGui-macos-arm64-desktop.zip`](https://github.com/michaelalexeevweb/yt-dlp-gui/releases/download/1.0.0/YtDlpGui-macos-arm64-desktop.zip) - app without bundled tools (user installs tools)
+- [`YtDlpGui-macos-arm64-portable.zip`](https://github.com/michaelalexeevweb/yt-dlp-gui/releases/download/1.0.0/YtDlpGui-macos-arm64-portable.zip) - app + bundled tools (`yt-dlp`, `ffmpeg`, `ffprobe`)
 
 Build commands (local, no Docker):
 
